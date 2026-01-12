@@ -100,7 +100,6 @@ jobs:
             --restart unless-stopped \
             dochub_backend:latest
 
-
           # Verify container is running
           sleep 2
           docker ps | grep dochub_backend || echo "WARNING: Container not running!"
