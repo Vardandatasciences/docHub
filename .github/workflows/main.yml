@@ -130,7 +130,19 @@ jobs:
 
       - name: Build Frontend Docker image
         run: |
-          docker build --no-cache --pull -t dochub_frontend:latest .
+          # Build with environment variables from .env.production if it exists
+          # Otherwise use default backend URL
+          if [ -f .env.production ]; then
+            echo "Building with .env.production file"
+            docker build --no-cache --pull -t dochub_frontend:latest .
+          else
+            echo "No .env.production found, using default backend URL"
+            docker build \
+              --build-arg VITE_API_BASE_URL=http://13.205.15.232:8002/api \
+              --build-arg VITE_ENV=production \
+              --no-cache --pull \
+              -t dochub_frontend:latest .
+          fi
 
       - name: Tag Frontend image for ECR
         run: |
