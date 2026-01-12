@@ -1,0 +1,336 @@
+name: CI/CD - DocHub (Frontend + Backend)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  # Docker network name
+  DOCKER_NETWORK: dochub_network
+  # Ports
+  BACKEND_PORT: 8002
+  FRONTEND_PORT: 8081
+  # Server details
+  SERVER_IP: 13.205.15.232
+  DOMAIN: riskavaire.vardaands.com
+  # ECR repository details
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 480940871468.dkr.ecr.ap-south-1.amazonaws.com
+  # NOTE: GitHub does not expand ${ECR_REGISTRY} inside env values,
+  # so we hard-code the full image URIs here.
+  BACKEND_IMAGE: 480940871468.dkr.ecr.ap-south-1.amazonaws.com/dochub:backend-latest
+  FRONTEND_IMAGE: 480940871468.dkr.ecr.ap-south-1.amazonaws.com/dochub:frontend-latest
+
+jobs:
+  # ============================================
+  # JOB 1: Setup (Create Docker Network)
+  # ============================================
+  setup:
+    runs-on: self-hosted
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Docker network
+        run: |
+          if [ "$(docker network ls -q -f name=${DOCKER_NETWORK})" ]; then
+            echo "Network ${DOCKER_NETWORK} already exists"
+          else
+            docker network create ${DOCKER_NETWORK}
+            echo "Created network ${DOCKER_NETWORK}"
+          fi
+
+  # ============================================
+  # JOB 2: Backend Build & Deploy
+  # ============================================
+  backend:
+    runs-on: self-hosted
+    needs: setup
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to ensure latest code
+
+      - name: Show current commit
+        run: |
+          echo "Building from commit: ${{ github.sha }}"
+          echo "Commit ref: ${{ github.ref }}"
+          echo "Commit message: ${{ github.event.head_commit.message || 'N/A' }}"
+
+      - name: Clean up Docker to free space
+        run: |
+          echo "Cleaning up Docker to free disk space..."
+          docker container prune -f || true
+          docker image prune -a -f || true
+          docker volume prune -f || true
+          docker builder prune -a -f || true
+          echo "Disk space after cleanup:"
+          df -h /
+
+      - name: Remove old Backend image
+        run: |
+          docker rmi dochub_backend:latest || true
+          docker rmi "${BACKEND_IMAGE}" || true
+
+      - name: Build Backend Docker image
+        working-directory: backend
+        run: |
+          docker build --no-cache --pull -t dochub_backend:latest .
+
+      - name: Tag Backend image for ECR
+        run: |
+          docker tag dochub_backend:latest "${BACKEND_IMAGE}"
+
+      - name: Push Backend to ECR
+        run: |
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          docker push "${BACKEND_IMAGE}"
+          echo "Backend image pushed to ECR successfully"
+
+      - name: Deploy Backend container
+        run: |
+          # Stop and remove existing container if it exists
+          if [ "$(docker ps -aq -f name=dochub_backend)" ]; then
+            echo "Stopping and removing existing backend container..."
+            docker stop dochub_backend || true
+            docker rm dochub_backend || true
+          fi
+
+          # Verify the image exists
+          echo "Verifying backend image exists..."
+          docker images | grep dochub_backend || echo "WARNING: Image not found!"
+
+          # Run new container on Docker network
+          # Uses existing config.env and host volumes under /home/ec2-user
+          # Expose port 8002 to host (maps host:8002 to container:8000)
+          echo "Starting new backend container..."
+          docker run -d \
+            --name dochub_backend \
+            --network ${DOCKER_NETWORK} \
+            -p ${BACKEND_PORT}:8000 \
+            --env-file /home/ec2-user/config.env \
+            -v /home/ec2-user/MEDIA_ROOT:/app/MEDIA_ROOT \
+            -v /home/ec2-user/TEMP_MEDIA_ROOT:/app/TEMP_MEDIA_ROOT \
+            -v /home/ec2-user/Reports:/app/Reports \
+            --restart unless-stopped \
+            dochub_backend:latest
+
+          # Verify container is running
+          sleep 2
+          docker ps | grep dochub_backend || echo "WARNING: Container not running!"
+          
+          # Show container logs to verify it started correctly
+          echo "=== Backend container startup logs ==="
+          docker logs dochub_backend --tail 30 || true
+
+      - name: Check Backend health
+        run: |
+          echo "Waiting for backend to be ready..."
+          sleep 10  # Give backend more time to start
+          
+          # Try to connect to backend
+          echo "Testing backend health at http://127.0.0.1:${BACKEND_PORT}/"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${BACKEND_PORT}/ || echo "000")
+          
+          if [ "$HTTP_CODE" = "000" ]; then
+            echo "ERROR: Backend not responding. Showing container status and logs:"
+            docker ps -a | grep dochub_backend || echo "Container not found!"
+            docker logs dochub_backend --tail 50 || true
+            echo "Backend health check failed (non-blocking)."
+          elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "Backend is responding (HTTP $HTTP_CODE) - Health check passed!"
+          else
+            echo "Backend returned HTTP $HTTP_CODE - may need investigation"
+          fi
+
+  # ============================================
+  # JOB 3: Frontend Build & Deploy
+  # ============================================
+  frontend:
+    runs-on: self-hosted
+    needs: setup
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to ensure latest code
+
+      - name: Show current commit
+        run: |
+          echo "Building from commit: ${{ github.sha }}"
+          echo "Commit ref: ${{ github.ref }}"
+          echo "Commit message: ${{ github.event.head_commit.message || 'N/A' }}"
+
+      - name: Clean up Docker to free space
+        run: |
+          echo "Cleaning up Docker to free disk space..."
+          docker container prune -f || true
+          docker image prune -a -f || true
+          docker volume prune -f || true
+          docker builder prune -a -f || true
+          echo "Disk space after cleanup:"
+          df -h /
+
+      - name: Remove old Frontend image
+        run: |
+          docker rmi dochub_frontend:latest || true
+          docker rmi "${FRONTEND_IMAGE}" || true
+
+      - name: Build Frontend Docker image
+        run: |
+          # Build with environment variables from .env.production if it exists
+          # If .env.production doesn't exist, use default values
+          if [ -f .env.production ]; then
+            echo "Using .env.production for build"
+            docker build --no-cache --pull -t dochub_frontend:latest .
+          else
+            echo "No .env.production found, building with default backend URL"
+            docker build \
+              --build-arg VITE_API_BASE_URL=http://dochub_backend:8000/api \
+              --build-arg VITE_ENV=production \
+              --no-cache --pull \
+              -t dochub_frontend:latest .
+          fi
+
+      - name: Tag Frontend image for ECR
+        run: |
+          docker tag dochub_frontend:latest "${FRONTEND_IMAGE}"
+
+      - name: Push Frontend to ECR
+        run: |
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          docker push "${FRONTEND_IMAGE}"
+          echo "Frontend image pushed to ECR successfully"
+
+      - name: Deploy Frontend container
+        run: |
+          # Stop and remove existing container if it exists
+          if [ "$(docker ps -aq -f name=dochub_frontend)" ]; then
+            echo "Stopping and removing existing frontend container..."
+            docker stop dochub_frontend || true
+            docker rm dochub_frontend || true
+          fi
+
+          # Verify the image exists
+          echo "Verifying frontend image exists..."
+          docker images | grep dochub_frontend || echo "WARNING: Image not found!"
+
+          # Run new container on Docker network
+          # Expose port 8081 to host (maps host:8081 to container:80)
+          # Connect to backend via Docker network
+          echo "Starting new frontend container..."
+          docker run -d \
+            --name dochub_frontend \
+            --network ${DOCKER_NETWORK} \
+            -p ${FRONTEND_PORT}:80 \
+            --restart unless-stopped \
+            dochub_frontend:latest
+
+          # Verify container is running
+          sleep 2
+          docker ps | grep dochub_frontend || echo "WARNING: Container not running!"
+          
+          # Show container logs to verify it started correctly
+          echo "=== Frontend container startup logs ==="
+          docker logs dochub_frontend --tail 30 || true
+
+      - name: Check Frontend health
+        run: |
+          echo "Waiting for frontend to be ready..."
+          sleep 5  # Give frontend time to start
+          
+          # Try to connect to frontend
+          echo "Testing frontend health at http://127.0.0.1:${FRONTEND_PORT}/"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${FRONTEND_PORT}/ || echo "000")
+          
+          if [ "$HTTP_CODE" = "000" ]; then
+            echo "ERROR: Frontend not responding. Showing container status and logs:"
+            docker ps -a | grep dochub_frontend || echo "Container not found!"
+            docker logs dochub_frontend --tail 50 || true
+            echo "Frontend health check failed (non-blocking)."
+          elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "Frontend is responding (HTTP $HTTP_CODE) - Health check passed!"
+          else
+            echo "Frontend returned HTTP $HTTP_CODE - may need investigation"
+          fi
+
+  # ============================================
+  # JOB 4: Final Verification (After Both Deploy)
+  # ============================================
+  verify:
+    runs-on: self-hosted
+    needs: [backend, frontend]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show all running containers
+        run: |
+          docker ps -a
+          echo "--- Network Info ---"
+          docker network inspect ${DOCKER_NETWORK} || true
+
+      - name: Verify Backend via API proxy
+        run: |
+          sleep 5
+          echo "Testing Backend connection via API proxy..."
+          
+          # Test the API proxy - 401 is expected (means backend is reachable, just needs auth)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${BACKEND_PORT}/api/ || echo "000")
+          
+          if [ "$HTTP_CODE" = "000" ]; then
+            echo "ERROR: Backend API proxy not responding"
+            docker logs dochub_backend --tail 30 || true
+            echo "API proxy check failed (non-blocking)."
+          elif [ "$HTTP_CODE" = "401" ]; then
+            echo "SUCCESS: API proxy is working! (401 Unauthorized is expected - backend is reachable)"
+          elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "SUCCESS: API proxy is working! (HTTP $HTTP_CODE)"
+          else
+            echo "API proxy returned HTTP $HTTP_CODE - backend may have issues"
+          fi
+
+      - name: Verify Frontend accessibility
+        run: |
+          sleep 5
+          echo "Testing Frontend accessibility..."
+          
+          # Test the frontend
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${FRONTEND_PORT}/ || echo "000")
+          
+          if [ "$HTTP_CODE" = "000" ]; then
+            echo "ERROR: Frontend not responding"
+            docker logs dochub_frontend --tail 30 || true
+            echo "Frontend check failed (non-blocking)."
+          elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "SUCCESS: Frontend is accessible! (HTTP $HTTP_CODE)"
+          else
+            echo "Frontend returned HTTP $HTTP_CODE - may need investigation"
+          fi
+
+      - name: Check container logs
+        if: failure()
+        run: |
+          echo "=== Backend Logs ==="
+          docker logs dochub_backend --tail 50 || true
+          echo "=== Frontend Logs ==="
+          docker logs dochub_frontend --tail 50 || true
+
+
+

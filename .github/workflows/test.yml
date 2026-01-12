@@ -1,0 +1,194 @@
+name: CI/CD - GRC & TPRM (2 Images)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  # Docker network name
+  DOCKER_NETWORK: grc_tprm_network
+  # Ports
+  BACKEND_PORT: 8000
+  # ECR repository details (adjust if needed)
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 480940871468.dkr.ecr.ap-south-1.amazonaws.com
+  # NOTE: GitHub does not expand ${ECR_REGISTRY} inside env values,
+  # so we hard-code the full image URIs here.
+  BACKEND_IMAGE: 480940871468.dkr.ecr.ap-south-1.amazonaws.com/grc_tprm_backend:latest
+
+jobs:
+  # ============================================
+  # JOB 1: Setup (Create Docker Network)
+  # ============================================
+  setup:
+    runs-on: self-hosted
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Docker network
+        run: |
+          if [ "$(docker network ls -q -f name=${DOCKER_NETWORK})" ]; then
+            echo "Network ${DOCKER_NETWORK} already exists"
+          else
+            docker network create ${DOCKER_NETWORK}
+            echo "Created network ${DOCKER_NETWORK}"
+          fi
+
+  # ============================================
+  # JOB 2: Backend Build & Deploy
+  # ============================================
+  backend:
+    runs-on: self-hosted
+    needs: setup
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to ensure latest code
+
+      - name: Show current commit
+        run: |
+          echo "Building from commit: ${{ github.sha }}"
+          echo "Commit ref: ${{ github.ref }}"
+          echo "Commit message: ${{ github.event.head_commit.message || 'N/A' }}"
+
+      - name: Clean up Docker to free space
+        run: |
+          echo "Cleaning up Docker to free disk space..."
+          docker container prune -f || true
+          docker image prune -a -f || true
+          docker volume prune -f || true
+          docker builder prune -a -f || true
+          echo "Disk space after cleanup:"
+          df -h /
+
+      - name: Remove old Backend image
+        run: |
+          docker rmi grc_tprm_backend:latest || true
+          docker rmi "${BACKEND_IMAGE}" || true
+
+      - name: Build Backend Docker image
+        working-directory: grc_backend
+        run: |
+          docker build --no-cache --pull -t grc_tprm_backend:latest .
+
+      - name: Tag Backend image for ECR
+        run: |
+          docker tag grc_tprm_backend:latest "${BACKEND_IMAGE}"
+
+      - name: Push Backend to ECR
+        run: |
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          docker push "${BACKEND_IMAGE}"
+          echo "Backend image pushed to ECR successfully"
+
+      - name: Deploy Backend container
+        run: |
+          # Stop and remove existing container if it exists
+          if [ "$(docker ps -aq -f name=grc_tprm_backend)" ]; then
+            echo "Stopping and removing existing backend container..."
+            docker stop grc_tprm_backend || true
+            docker rm grc_tprm_backend || true
+          fi
+
+          # Verify the image exists
+          echo "Verifying backend image exists..."
+          docker images | grep grc_tprm_backend || echo "WARNING: Image not found!"
+
+          # Run new container on Docker network
+          # Uses existing config.env and host volumes under /home/ec2-user
+          # Expose port 8000 to host for health checks
+          echo "Starting new backend container..."
+          docker run -d \
+            --name grc_tprm_backend \
+            --network ${DOCKER_NETWORK} \
+            -p ${BACKEND_PORT}:8000 \
+            --env-file /home/ec2-user/config.env \
+            -v /home/ec2-user/MEDIA_ROOT:/app/MEDIA_ROOT \
+            -v /home/ec2-user/TEMP_MEDIA_ROOT:/app/TEMP_MEDIA_ROOT \
+            -v /home/ec2-user/Reports:/app/Reports \
+            --restart unless-stopped \
+            grc_tprm_backend:latest
+
+          # Verify container is running
+          sleep 2
+          docker ps | grep grc_tprm_backend || echo "WARNING: Container not running!"
+          
+          # Show container logs to verify it started correctly
+          echo "=== Backend container startup logs ==="
+          docker logs grc_tprm_backend --tail 30 || true
+
+      - name: Check Backend health
+        run: |
+          echo "Waiting for backend to be ready..."
+          sleep 10  # Give backend more time to start
+          
+          # Try to connect to backend
+          echo "Testing backend health at http://127.0.0.1:${BACKEND_PORT}/"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${BACKEND_PORT}/ || echo "000")
+          
+          if [ "$HTTP_CODE" = "000" ]; then
+            echo "ERROR: Backend not responding. Showing container status and logs:"
+            docker ps -a | grep grc_tprm_backend || echo "Container not found!"
+            docker logs grc_tprm_backend --tail 50 || true
+            echo "Backend health check failed (non-blocking)."
+          elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "Backend is responding (HTTP $HTTP_CODE) - Health check passed!"
+          else
+            echo "Backend returned HTTP $HTTP_CODE - may need investigation"
+          fi
+
+  # ============================================
+  # JOB 3: Final Verification (After Both Deploy)
+  # ============================================
+  verify:
+    runs-on: self-hosted
+    needs: backend
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show all running containers
+        run: |
+          docker ps -a
+          echo "--- Network Info ---"
+          docker network inspect ${DOCKER_NETWORK} || true
+
+      - name: Verify Backend via API proxy
+        run: |
+          sleep 5
+          echo "Testing Backend connection via API proxy..."
+          
+          # Test the API proxy - 401 is expected (means backend is reachable, just needs auth)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${BACKEND_PORT}/api/ || echo "000")
+          
+          if [ "$HTTP_CODE" = "000" ]; then
+            echo "ERROR: Backend API proxy not responding"
+            docker logs grc_tprm_backend --tail 30 || true
+            echo "API proxy check failed (non-blocking)."
+          elif [ "$HTTP_CODE" = "401" ]; then
+            echo "SUCCESS: API proxy is working! (401 Unauthorized is expected - backend is reachable)"
+          elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "SUCCESS: API proxy is working! (HTTP $HTTP_CODE)"
+          else
+            echo "API proxy returned HTTP $HTTP_CODE - backend may have issues"
+          fi
+
+      - name: Check container logs
+        if: failure()
+        run: |
+          echo "=== Backend Logs ==="
+          docker logs grc_tprm_backend --tail 50 || true

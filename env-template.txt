@@ -1,0 +1,79 @@
+# ========================================
+# ENVIRONMENT FILES FOR FRONTEND
+# ========================================
+
+# Copy the content below to create your environment files
+
+# ========================================
+# FILE: .env.development
+# ========================================
+VITE_API_BASE_URL=http://localhost:5000/api
+VITE_ENV=development
+
+
+# ========================================
+# FILE: .env.production
+# ========================================
+VITE_API_BASE_URL=https://your-production-domain.com/api
+VITE_ENV=production
+
+
+# ========================================
+# INSTRUCTIONS
+# ========================================
+
+# Windows PowerShell:
+# -------------------
+# Create .env.development:
+@"
+VITE_API_BASE_URL=http://localhost:5000/api
+VITE_ENV=development
+"@ | Out-File -FilePath .env.development -Encoding utf8
+
+# Create .env.production:
+@"
+VITE_API_BASE_URL=https://your-production-domain.com/api
+VITE_ENV=production
+"@ | Out-File -FilePath .env.production -Encoding utf8
+
+
+# Git Bash / Linux / Mac:
+# -----------------------
+# Create .env.development:
+cat > .env.development << 'EOL'
+VITE_API_BASE_URL=http://localhost:5000/api
+VITE_ENV=development
+EOL
+
+# Create .env.production:
+cat > .env.production << 'EOL'
+VITE_API_BASE_URL=https://your-production-domain.com/api
+VITE_ENV=production
+EOL
+
+
+# Manual Creation:
+# ---------------
+# 1. Create file named: .env.development
+# 2. Add these two lines:
+#    VITE_API_BASE_URL=http://localhost:5000/api
+#    VITE_ENV=development
+#
+# 3. Create file named: .env.production
+# 4. Add these two lines:
+#    VITE_API_BASE_URL=https://your-production-domain.com/api
+#    VITE_ENV=production
+
+
+# IMPORTANT NOTES:
+# ---------------
+# 1. File must be named EXACTLY: .env.development (with the dot)
+# 2. File must be in project root (same folder as package.json)
+# 3. Restart Vite dev server after creating/changing env files
+# 4. Never commit .env files to git (already in .gitignore)
+
+
+
+
+
+
