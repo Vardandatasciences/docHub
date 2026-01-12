@@ -93,12 +93,13 @@ jobs:
           docker run -d \
             --name dochub_backend \
             -p ${BACKEND_PORT}:8000 \
-            --env-file /home/ec2-user/config.env \
-            -v /home/ec2-user/MEDIA_ROOT:/app/MEDIA_ROOT \
-            -v /home/ec2-user/TEMP_MEDIA_ROOT:/app/TEMP_MEDIA_ROOT \
-            -v /home/ec2-user/Reports:/app/Reports \
+            --env-file /home/ubuntu/dochub.env \  # Ensure this points to the correct file
+            -v /home/ubuntu/MEDIA_ROOT:/app/MEDIA_ROOT \
+            -v /home/ubuntu/TEMP_MEDIA_ROOT:/app/TEMP_MEDIA_ROOT \
+            -v /home/ubuntu/Reports:/app/Reports \
             --restart unless-stopped \
             dochub_backend:latest
+
 
           # Verify container is running
           sleep 2
